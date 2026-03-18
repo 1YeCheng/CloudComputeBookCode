@@ -103,8 +103,8 @@ func NewConn(c net.Conn) *Conn {
 // ╚═════════════════════════════════════════════════════════════════════════╝
 func (c *Conn) Send(msg Message) error {
 	// TODO: 使用 c.encoder 将 msg 编码并发送
-	// 参考：return c.encoder.Encode(???)
-	panic("Send 尚未实现，请完成 TODO")
+	return c.encoder.Encode(&msg)
+	//panic("Send 尚未实现，请完成 TODO")
 }
 
 // ╔═════════════════════════════════════════════════════════════════════════╗
@@ -122,10 +122,10 @@ func (c *Conn) Send(msg Message) error {
 func (c *Conn) Receive() (Message, error) {
 	// TODO: 使用 c.decoder 从连接中解码一条消息并返回
 	// 步骤：
-	//   var msg Message
-	//   err := c.decoder.Decode(???)
-	//   return ???, ???
-	panic("Receive 尚未实现，请完成 TODO")
+	var msg Message
+	err := c.decoder.Decode(&msg)
+	return msg, err
+	//panic("Receive 尚未实现，请完成 TODO")
 }
 
 // Close 关闭底层 TCP 连接，已实现，无需修改。

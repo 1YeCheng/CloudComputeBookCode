@@ -86,7 +86,7 @@ func main() {
 		// ╚═══════════════════════════════════════════════════════════════╝
 
 		// TODO D-2: 将此行改为 Goroutine 调用
-		handleClient(w, raw) // ← 请在此行前加 go 关键字
+		go handleClient(w, raw) // ← 请在此行前加 go 关键字
 	}
 }
 

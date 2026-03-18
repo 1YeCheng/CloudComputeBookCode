@@ -146,25 +146,33 @@ func (g *Game) handleMove(p *Player, dir string) string {
 	//
 	// 参考框架：
 	//
-	//   oldX, oldY := p.X, p.Y
-	//   switch dir {
-	//   case protocol.DirUp:
-	//       if p.Y > 0 { p.Y-- }
-	//   case protocol.DirDown:
-	//       // ...
-	//   case protocol.DirLeft:
-	//       // ...
-	//   case protocol.DirRight:
-	//       // ...
-	//   default:
-	//       return fmt.Sprintf("[%s] 无效方向 '%s'", p.Name, dir)
-	//   }
-	//   if p.X == oldX && p.Y == oldY {
-	//       return fmt.Sprintf("🚧 %s 撞到了边界", p.Name)
-	//   }
-	//   return fmt.Sprintf("🚶 %s 移动到 (%d,%d)", p.Name, p.X, p.Y)
+	oldX, oldY := p.X, p.Y
+	switch dir {
+	case protocol.DirUp:
+		if p.Y > 0 {
+			p.Y--
+		}
+	case protocol.DirDown:
+		if p.Y < protocol.MapHeight-1 {
+			p.Y++
+		}
+	case protocol.DirLeft:
+		if p.X > 0 {
+			p.X--
+		}
+	case protocol.DirRight:
+		if p.X < protocol.MapWidth-1 {
+			p.X++
+		}
+	default:
+		return fmt.Sprintf("[%s] 无效方向 '%s'", p.Name, dir)
+	}
+	if p.X == oldX && p.Y == oldY {
+		return fmt.Sprintf("🚧 %s 撞到了边界", p.Name)
+	}
+	return fmt.Sprintf("🚶 %s 移动到 (%d,%d)", p.Name, p.X, p.Y)
 
-	panic("handleMove 尚未实现，请完成 TODO")
+	//panic("handleMove 尚未实现，请完成 TODO")
 }
 
 // ╔═════════════════════════════════════════════════════════════════════════╗
@@ -188,18 +196,21 @@ func (g *Game) handleAttack(actor, target *Player) string {
 	// TODO: 实现攻击逻辑
 	//
 	// 步骤提示：
-	//   dist := math.Abs(float64(actor.X-target.X)) + math.Abs(float64(actor.Y-target.Y))
-	//   if dist > float64(protocol.AttackRange) {
-	//       return "攻击失败：目标超出范围..."
-	//   }
-	//   target.HP -= protocol.AttackDmg
-	//   if target.HP <= 0 { target.HP = 0; target.Alive = false }
-	//   return "攻击成功..."
-	//
+	dist := math.Abs(float64(actor.X-target.X)) + math.Abs(float64(actor.Y-target.Y))
+	if dist > float64(protocol.AttackRange) {
+		return "攻击失败：目标超出范围..."
+	}
+	target.HP -= protocol.AttackDmg
+	if target.HP <= 0 {
+		target.HP = 0
+		target.Alive = false
+	}
+	return "攻击成功..."
+
 	// 注意：直接使用 math.Abs，已导入 math 包
 
-	_ = math.Abs // 防止 import 报错，实现后可删除此行
-	panic("handleAttack 尚未实现，请完成 TODO")
+	//_ = math.Abs // 防止 import 报错，实现后可删除此行
+	// panic("handleAttack 尚未实现，请完成 TODO")
 }
 
 // handleHeal 使用药水，已实现，无需修改。

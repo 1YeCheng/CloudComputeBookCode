@@ -152,7 +152,7 @@ func main() {
 
 	conn := protocol.NewConn(raw)
 	conn.Send(protocol.Message{Type: protocol.TypeJoin, Text: name})
-	
+
 	addEvent("✅ 已连接，开始游戏！（随时可输入指令）")
 
 	done := make(chan struct{})
@@ -198,13 +198,42 @@ func main() {
 	// ║        }                                                          ║
 	// ║    }()                                                            ║
 	// ╚═══════════════════════════════════════════════════════════════════╝
+	go func() {
+		defer close(done)
+		for {
+			msg, err := conn.Receive()
+			if err != nil {
+				addEvent("服务器连接已断开")
+				drawUI()
+				return
+			}
+
+			switch msg.Type {
+			case protocol.TypeInit:
+				myPlayerID = msg.YourID
+				addEvent(fmt.Sprintf("🎮 %s（你的ID: %d）", msg.Text, myPlayerID))
+				drawUI()
+			case protocol.TypeBroadcast:
+				updateSnapshot(msg)
+				drawUI()
+			case protocol.TypeEvent:
+				addEvent(msg.Text)
+				drawUI()
+			case protocol.TypeGameOver:
+				addEvent(fmt.Sprintf("💀 游戏通知: %s", msg.Winner))
+				drawUI()
+
+			}
+		}
+
+	}()
 	for {
 		select {
 		case <-done:
 			return
 		default:
 		}
-		
+
 		in, err := reader.ReadString('\n')
 		if err != nil {
 			return

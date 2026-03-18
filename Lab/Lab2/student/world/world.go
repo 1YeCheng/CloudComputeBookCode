@@ -77,9 +77,9 @@ func (p *Player) toInfo() protocol.PlayerInfo {
 //   - 读操作可并发（多个读者同时读取）
 //   - 写者与读者互斥（写时不能读，读时不能写）
 type World struct {
-	mu      sync.RWMutex   // 读写锁，保护以下字段
+	mu      sync.RWMutex    // 读写锁，保护以下字段
 	players map[int]*Player // 玩家 ID → 玩家实体
-	nextID  int            // 下一个可用的玩家 ID
+	nextID  int             // 下一个可用的玩家 ID
 }
 
 // NewWorld 创建空世界，已实现，无需修改。
@@ -105,15 +105,15 @@ func (w *World) AddPlayer(name string, conn *protocol.Conn) (int, *Player) {
 	// TODO: 加写锁，创建玩家，存入 map，返回 id 和玩家
 
 	// 提示框架：
-	// w.mu.Lock()
-	// defer w.mu.Unlock()
-	// id := w.nextID
-	// w.nextID++
-	// p := newPlayer(id, name, conn)
-	// w.players[id] = p
-	// return id, p
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	id := w.nextID
+	w.nextID++
+	p := newPlayer(id, name, conn)
+	w.players[id] = p
+	return id, p
 
-	panic("AddPlayer 尚未实现，请完成 TODO")
+	//panic("AddPlayer 尚未实现，请完成 TODO")
 }
 
 // ╔═════════════════════════════════════════════════════════════════════════╗
@@ -129,8 +129,10 @@ func (w *World) AddPlayer(name string, conn *protocol.Conn) (int, *Player) {
 // ╚═════════════════════════════════════════════════════════════════════════╝
 func (w *World) RemovePlayer(id int) {
 	// TODO: 加写锁，从 map 中删除 id 对应的玩家
-
-	panic("RemovePlayer 尚未实现，请完成 TODO")
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	delete(w.players, id)
+	//panic("RemovePlayer 尚未实现，请完成 TODO")
 }
 
 // ╔═════════════════════════════════════════════════════════════════════════╗
@@ -153,8 +155,39 @@ func (w *World) RemovePlayer(id int) {
 // ╚═════════════════════════════════════════════════════════════════════════╝
 func (w *World) MovePlayer(id int, dir string) string {
 	// TODO: 加写锁，查找玩家，移动并做边界检查，返回事件字符串
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	p, ok := w.players[id]
+	if !ok || !p.Alive {
+		return ""
+	}
+	oldX, oldY := p.X, p.Y
+	switch dir {
+	case protocol.DirUp:
+		if p.Y > 0 {
+			p.Y--
+		}
 
-	panic("MovePlayer 尚未实现，请完成 TODO")
+	case protocol.DirDown:
+		if p.Y < protocol.MapHeight-1 {
+			p.Y++
+		}
+
+	case protocol.DirRight:
+		if p.X < protocol.MapWidth-1 {
+			p.X++
+		}
+	case protocol.DirLeft:
+		if p.X > 0 {
+			p.X--
+		}
+	default:
+	}
+	if p.X == oldX && p.Y == oldY {
+		return "撞墙"
+	}
+	return fmt.Sprintf("成功移动至X=%d,Y=%d", p.X, p.Y)
+	//panic("MovePlayer 尚未实现，请完成 TODO")
 }
 
 // ╔═════════════════════════════════════════════════════════════════════════╗
@@ -170,10 +203,10 @@ func (w *World) MovePlayer(id int, dir string) string {
 // ║    3. 遍历 w.players，计算曼哈顿距离，找到范围内血量最低的活着的对手    ║
 // ║       dist := math.Abs(float64(attacker.X-p.X)) +                      ║
 // ║               math.Abs(float64(attacker.Y-p.Y))                        ║
-// ║    4. 若没找到目标，返回"范围内没有敌人"                               ║
+// ║    4. 若没找到目标，返回"范围内没有敌人"                                 ║
+// ║       a. target.HP = 0（⚠️ 先夹紧到 0，再构建事件字符串，避免负数）      ║
 // ║    5. target.HP -= protocol.AttackDmg                                   ║
-// ║    6. 若 target.HP <= 0：                                               ║
-// ║       a. target.HP = 0（⚠️ 先夹紧到 0，再构建事件字符串，避免负数）    ║
+// ║    6. 若 target.HP <= 0：                                           ║
 // ║       b. target.Alive = false; attacker.Kills++                         ║
 // ║       c. 启动 Goroutine 等待 5s 后调用 w.respawn(targetID)              ║
 // ║          并调用 broadcastFn("xxx 已复活")                               ║
@@ -185,10 +218,47 @@ func (w *World) MovePlayer(id int, dir string) string {
 func (w *World) AttackPlayer(attackerID int, broadcastFn func(string)) string {
 	// TODO: 加写锁，查找攻击者，找最弱目标，扣血，处理死亡与复活 Goroutine
 
-	_ = math.Abs  // 防止 import 报错，实现后可删除
-	_ = time.Sleep // 防止 import 报错
+	w.mu.Lock()
+	defer w.mu.Unlock()
 
-	panic("AttackPlayer 尚未实现，请完成 TODO")
+	attackeeID, minHP := -1, protocol.InitHP+1
+
+	attacker, ok := w.players[attackerID]
+	if !ok || !attacker.Alive {
+		return ""
+	}
+	for _, p := range w.players {
+		dist := math.Abs(float64(attacker.X-p.X)) +
+			math.Abs(float64(attacker.Y-p.Y))
+		if dist <= protocol.AttackRange {
+			if p.HP < minHP {
+				attackeeID, minHP = p.ID, p.HP
+			}
+		}
+	}
+	if attackeeID == -1 {
+		return "范围内没有敌人"
+	}
+
+	attackee := w.players[attackeeID]
+	attackee.HP -= protocol.AttackDmg
+	if attackee.HP <= 0 {
+		attackee.HP = 0
+		attackee.Alive = false
+		attacker.Kills++
+		go func() {
+
+			time.Sleep(5 * time.Second)
+			w.respawn(attackeeID)
+			broadcastFn("xxx 已复活")
+		}()
+	}
+
+	return fmt.Sprintf("%q 攻击了 %q!%q 的HP降至 %d！", attacker.Name, attackee.Name, attackee.Name, attackee.HP)
+	//_ = math.Abs   // 防止 import 报错，实现后可删除
+	//_ = time.Sleep // 防止 import 报错
+
+	//panic("AttackPlayer 尚未实现，请完成 TODO")
 }
 
 // HealPlayer 使用药水，已实现，无需修改。
@@ -245,8 +315,15 @@ func (w *World) respawn(id int) {
 // ╚═════════════════════════════════════════════════════════════════════════╝
 func (w *World) GetSnapshot() []protocol.PlayerInfo {
 	// TODO: 加读锁，遍历 players，收集并返回所有玩家的 Info 快照
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	infos := make([]protocol.PlayerInfo, 0, len(w.players))
+	for _, p := range w.players {
+		infos = append(infos, p.toInfo())
+	}
+	return infos
 
-	panic("GetSnapshot 尚未实现，请完成 TODO")
+	//panic("GetSnapshot 尚未实现，请完成 TODO")
 }
 
 // ─── 广播辅助（无需修改） ────────────────────────────────────────────────────
