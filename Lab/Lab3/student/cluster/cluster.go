@@ -55,10 +55,10 @@ type Cluster struct {
 	mu       sync.RWMutex
 	store    *storage.Store
 	nodes    map[string]*NodeService
-	sessions map[string]*Session
-	owners   map[string]string
-	replicas map[string]string
-	configs  map[string]world.MapConfig
+	sessions map[string]*Session        //key==username
+	owners   map[string]string          //key==mapID
+	replicas map[string]string          //..
+	configs  map[string]world.MapConfig //..
 	boss     *BossState
 	stopCh   chan struct{}
 }
@@ -302,27 +302,136 @@ func (c *Cluster) BuyItem(username, item string) (*protocol.WorldState, error) {
 	_ = c.persistSessionState(username)
 	return c.SnapshotFor(username)
 }
-
 func (c *Cluster) AttackBoss(username string) (*protocol.WorldState, error) {
 	// TODO(Lab3-1):
 	// 这里需要把“世界首领”做成跨地图、跨节点共享的全局热状态。
 	// 要求至少完成：
+	session, node, err := c.sessionNode(username)
+	if err != nil {
+		return nil, err
+	}
+
+	profile, ok := node.Profile(session.MapID, username)
+	if !ok {
+		return nil, errors.New("获取玩家profile失败")
+	}
+
+	c.mu.RLock()
+	if !c.boss.Alive {
+		c.mu.RUnlock()
+		return nil, errors.New("等待首领复活")
+	}
+
+	bossSite, ok := c.bossSite(session.MapID)
+	if !ok {
+		c.mu.RUnlock()
+		return nil, errors.New("当前地图没有首领投影")
+	}
+
 	// 1. 校验玩家和当前地图的首领投影距离，太远则拒绝攻击。
+	if manhattan(bossSite.X, bossSite.Y, profile.X, profile.Y) > protocol.BossAtkRange {
+		c.mu.RUnlock()
+		return nil, fmt.Errorf("首领在范围外,剩余HP:%d", c.boss.HP)
+	}
 	// 2. 对全局首领 HP 做单写者更新，避免多个节点并发扣血产生不一致。
+	c.mu.RUnlock()
+	damadge := profile.Attack
+	c.mu.Lock()
+	c.boss.HP -= damadge
+	c.boss.Contributors[username] += damadge
+	if c.boss.HP <= 0 {
+
+		c.boss.Alive = false
+		//c.boss.Contributors[username] -= (damadge - c.boss.HP)
+		c.boss.HP = 0
+		c.boss.LastHit = username
+		c.broadcastGlobalEventLocked(fmt.Sprintf("boss:%q,已经死亡！终结者：%q", c.boss.Name, username))
+		go c.respawnBossAfterCooldown()
+	}
+
+	bossTmp := c.boss
+	c.mu.Unlock()
+
+	c.broadcastGlobalEvent(fmt.Sprintf("%q 对 %q 造成了 %d 点伤害！剩余HP：%d", username, bossTmp.Name, damadge, bossTmp.HP))
+	if !bossTmp.Alive {
+
+		//奖励参与者
+		for name, con := range bossTmp.Contributors {
+			c.mu.RLock()
+			session := c.sessions[name]
+			c.mu.RUnlock()
+			profile, ok := node.RewardPlayer(session.MapID, name, con, con) //,name,contri,contri)
+			if ok {
+				c.pushEvent(name, "您参与了boss攻略战！")
+				profile.LastNode = session.NodeID
+				profile.LastMap = session.MapID
+				_ = c.store.SaveProfile(profile)
+				_ = c.persistSessionState(name)
+			}
+		}
+	}
+	profile.LastNode = session.NodeID
+	profile.LastMap = session.MapID
+	_ = c.store.SaveProfile(profile)
+	_ = c.persistSessionState(username)
+	return c.SnapshotFor(username)
 	// 3. 首领死亡时，给所有参与玩家统一结算奖励，并安排复活。
 	// 4. 将结果广播到所有在线会话，而不是只发给当前地图。
-	return nil, studentTODOError("Lab3-1", "cluster.AttackBoss", "完成全服共享世界首领的协同结算")
+	//return nil, studentTODOError("Lab3-1", "cluster.AttackBoss", "完成全服共享世界首领的协同结算")
 }
 
 func (c *Cluster) SwitchMap(username, targetMap string) (*protocol.WorldState, error) {
-	// TODO(Lab3-2):
+	// TODO(Labc.mu.Unlock()3-2):
 	// 这里需要实现“跨地图切换 + 节点路由迁移”。
 	// 至少要处理：
+
+	session, src_node, err := c.sessionNode(username)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.RLock()
+	dst_node := c.owners[targetMap]
+	dst := c.nodes[dst_node]
+	c.mu.RUnlock()
+	profile, ok := src_node.RemovePlayer(session.MapID, username)
+	if !ok {
+		return nil, errors.New("源节点移除玩家失败")
+	}
+
+	_, stillExists := src_node.Profile(session.MapID, username)
+	if stillExists {
+		fmt.Printf("[WARN] 移除后玩家仍然存在于源地图！\n")
+	}
+
+	dst.AddPlayer(targetMap, &profile)
+	profile, _ = dst.Profile(targetMap, username)
+	if !ok {
+		return nil, errors.New("获取移动后用户信息失败")
+	}
+
+	profile.LastMap = targetMap
+	profile.LastNode = dst_node
+	c.mu.Lock()
+	session, ok = c.sessions[username]
+	session.MapID = targetMap
+	session.NodeID = dst.ID
+	session.Version++
+	// c.mu.RLock()
+	// currentSession, _ := c.sessions[username]
+	// fmt.Printf("[DEBUG] Session 更新后: MapID=%s, NodeID=%s, Version=%d\n",
+	// 	currentSession.MapID, currentSession.NodeID, currentSession.Version)
+	c.mu.Unlock()
+
+	c.pushEventLocked(session, fmt.Sprintf("切换到地图 %s", targetMap))
+	_ = c.store.SaveProfile(profile)
+	_ = c.persistSessionState(username)
+
+	return c.SnapshotFor(username)
 	// 1. 从源节点摘除玩家热状态。
 	// 2. 根据 owners 路由把玩家挂到目标地图主节点。
 	// 3. 更新 session.MapID / session.NodeID。
 	// 4. 将新的位置、地图、节点落盘到冷热数据。
-	return nil, studentTODOError("Lab3-2", "cluster.SwitchMap", "完成跨地图路由与会话迁移")
+	//return nil, studentTODOError("Lab3-2", "cluster.SwitchMap", "完成跨地图路由与会话迁移")
 }
 
 func (c *Cluster) SnapshotFor(username string) (*protocol.WorldState, error) {
@@ -489,10 +598,47 @@ func (c *Cluster) persistSessionState(username string) error {
 	// TODO(Lab3-3):
 	// 这里负责把玩家当前热状态写回存储。
 	// 建议区分：
+	//首先从session获取必要的信息
+	c.mu.RLock()
+	session, ok := c.sessions[username]
+
+	if !ok {
+		c.mu.RUnlock()
+		return nil
+	}
+	node, ok := c.nodes[session.NodeID]
+	c.mu.RUnlock()
+	if node == nil {
+		return nil
+	}
+
+	profile, ok := node.Profile(session.MapID, username)
+	if !ok {
+		return nil
+	}
+	hotData := &protocol.HotSession{
+		Username:       username,
+		MapID:          session.MapID,
+		NodeID:         session.NodeID,
+		X:              profile.X,
+		Y:              profile.Y,
+		HP:             profile.HP,
+		Treasures:      profile.Treasures,
+		SessionVersion: session.Version,
+		UpdatedAt:      time.Now(),
+	}
+	profile.LastMap = session.MapID
+	profile.LastNode = session.NodeID
+	if err := c.store.SaveProfile(profile); err != nil {
+		return err
+	}
+	if err := c.store.SaveHotSession(*hotData); err != nil {
+		return err
+	}
 	// 1. 冷数据：账号、密码哈希、历史战绩、最近退出位置。
 	// 2. 热数据：当前地图、节点、坐标、生命值、会话版本。
 	// 注意持久化时机，避免因为节点故障导致最新状态丢失。
-	return studentTODOError("Lab3-3", "cluster.persistSessionState", "完成会话热数据与用户冷数据持久化")
+	return nil //studentTODOError("Lab3-3", "cluster.persistSessionState", "完成会话热数据与用户冷数据持久化")
 }
 
 func (c *Cluster) respawnBossAfterCooldown() {
@@ -572,6 +718,44 @@ func (c *Cluster) heartbeatLoop() {
 }
 
 func (c *Cluster) checkpointLoop() {
+	ticker := time.NewTicker(700 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+
+			c.mu.RLock()
+			// 获取所有地图的 owner 和 replica 映射
+			owners := make(map[string]string)
+			for mapID, ownerID := range c.owners {
+				owners[mapID] = ownerID
+			}
+			replicas := make(map[string]string)
+			for mapID, replicaID := range c.replicas {
+				replicas[mapID] = replicaID
+			}
+			c.mu.RUnlock()
+
+			for mapID, nodeID := range owners {
+				owner := c.nodes[nodeID] //c.nodes是静态的，不存在被修改的风险
+				if !owner.healthy {
+					continue
+				}
+				CP, _ := owner.Checkpoint(mapID)
+
+				_ = c.store.SaveCheckpoint(CP)
+				replicaID := replicas[mapID]
+				replica := c.nodes[replicaID]
+				if replica.healthy && replica != nil {
+					replica.StoreReplica(CP)
+				}
+			}
+
+		case <-c.stopCh:
+			return
+		}
+	}
 	// TODO(Lab3-4):
 	// 这里要实现“主节点定期生成检查点，并复制给副本节点”。
 	// 至少要包含：
@@ -579,8 +763,7 @@ func (c *Cluster) checkpointLoop() {
 	// 2. 抓取主节点地图快照。
 	// 3. 同时写入本地检查点存储与 replica 节点内存。
 	// 4. 跳过故障节点，避免把坏状态继续扩散。
-	logStudentTODO("Lab3-4", "cluster.checkpointLoop", "完成主节点检查点复制与副本同步")
-	<-c.stopCh
+	//logStudentTODO("Lab3-4", "cluster.checkpointLoop", "完成主节点检查点复制与副本同步")
 }
 
 func (c *Cluster) flushLoop() {
@@ -614,7 +797,35 @@ func (c *Cluster) handleNodeFailure(nodeID string) {
 	// 2. 选择对应副本并提升为新主节点。
 	// 3. 更新 owners / replicas 元数据。
 	// 4. 修正所有受影响玩家会话的 NodeID，并广播故障切换事件。
-	logStudentTODO("Lab3-5", "cluster.handleNodeFailure", "完成主节点故障后的副本提升与会话重路由")
+	node := c.nodes[nodeID]
+	if node == nil {
+		return
+	}
+
+	map2Change := node.View().PrimaryMaps
+	c.mu.Lock()
+	for _, mapID := range map2Change {
+		replicasID := c.replicas[mapID]
+		replicasNode := c.nodes[replicasID]
+		if replicasNode == nil || !replicasNode.IsHealthy() {
+			continue
+		}
+		replicasNode.Promote(mapID, c.configs[mapID])
+		delete(c.replicas, mapID)
+		newReplicaID := c.pickReplicaLocked(replicasID)
+		c.replicas[mapID] = newReplicaID
+		c.owners[mapID] = replicasID
+
+	}
+	for _, session := range c.sessions {
+		if session.NodeID == nodeID {
+			session.NodeID = c.owners[session.MapID]
+		}
+	}
+	c.mu.Unlock()
+	c.broadcastGlobalEvent(fmt.Sprintf("%q 发生故障，已转移其他节点负责", nodeID))
+
+	//logStudentTODO("Lab3-5", "cluster.handleNodeFailure", "完成主节点故障后的副本提升与会话重路由")
 }
 
 func (c *Cluster) pickReplicaLocked(ownerID string) string {
@@ -730,7 +941,7 @@ func (c *Cluster) buildBossSites() []protocol.BossSite {
 	mapIDs := make([]string, 0, len(c.configs))
 	for mapID := range c.configs {
 		mapIDs = append(mapIDs, mapID)
-	}
+	} //获取所有地图名，并排序
 	sort.Strings(mapIDs)
 
 	sites := make([]protocol.BossSite, 0, len(mapIDs))
@@ -835,6 +1046,7 @@ func (n *NodeService) AddPlayer(mapID string, profile *protocol.UserProfile) {
 	instance := n.maps[mapID]
 	n.mu.RUnlock()
 	if instance == nil {
+		fmt.Println("add player：没有找到源节点")
 		return
 	}
 	instance.AddOrRestorePlayer(profile)
@@ -888,6 +1100,15 @@ func (n *NodeService) BuyItem(mapID, username, item string) (string, protocol.Us
 		return "", protocol.UserProfile{}, false
 	}
 	return instance.BuyItem(username, item)
+}
+func (n *NodeService) sl2_WithinRange(mapID, username string) bool {
+	n.mu.RLock()
+	instance := n.maps[mapID]
+	n.mu.RUnlock()
+	if instance == nil {
+		return false
+	}
+	return instance.Sl2_WithinRange(username)
 }
 
 func (n *NodeService) Profile(mapID, username string) (protocol.UserProfile, bool) {
@@ -1031,11 +1252,11 @@ func (n *NodeService) SetHealthy(healthy bool) bool {
 
 func newBossState() *BossState {
 	return &BossState{
-		Name:  "烬灭魔龙",
+		Name:  "王子文",
 		HP:    1600,
 		MaxHP: 1600,
 		Alive: true,
-		Sites: []protocol.BossSite{
+		Sites: []protocol.BossSite{ //考虑到随后的初始化，这里值为空也可以？
 			{MapID: "green", X: 50, Y: 20},
 			{MapID: "cave", X: 49, Y: 20},
 			{MapID: "ruins", X: 50, Y: 20},

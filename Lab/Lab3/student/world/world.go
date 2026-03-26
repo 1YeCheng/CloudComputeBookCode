@@ -150,6 +150,11 @@ func (w *World) AddOrRestorePlayer(profile *protocol.UserProfile) protocol.Playe
 	}
 	w.players[player.Username] = player
 	w.version++
+	// fmt.Println("成功添加角色到", w.cfg.ID)
+	// fmt.Println("以下是当前地图所有角色")
+	for i := range w.players {
+		fmt.Println(i)
+	}
 	return w.playerViewLocked(player)
 }
 
@@ -354,6 +359,31 @@ func (w *World) BuyItem(username, item string) (string, protocol.UserProfile, bo
 	}
 }
 
+func (w *World) Sl2_WithinRange(username string) bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	player, ok := w.players[username]
+	if !ok {
+		return false
+	}
+	if distance(w.cfg.BossX, w.cfg.BossY, player.X, player.Y) > protocol.BossAtkRange {
+		return false
+	}
+	return true
+}
+
+func (w *World) Sl2_GetDamadge(username string) int {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	player, ok := w.players[username]
+	if !ok {
+		return 0
+	}
+	return player.Attack
+
+}
 func (w *World) BackgroundStep() []string {
 	w.mu.Lock()
 	defer w.mu.Unlock()

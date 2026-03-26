@@ -210,12 +210,15 @@ func (c *Client) waitState(d time.Duration, predicate func(*WorldState) bool) (*
 	for time.Now().Before(deadline) {
 		msg, err := c.recvWithTimeout(time.Until(deadline))
 		if err != nil {
+			//fmt.Println("err != nil")
 			return nil, err
 		}
 		if msg.Type == TypeError {
+			//fmt.Println("msg.Type == TypeError:", msg.Error)
 			return nil, fmt.Errorf(msg.Error)
 		}
 		if (msg.Type == TypeState || msg.Type == TypeAuth) && msg.State != nil && predicate(msg.State) {
+			//fmt.Println("(msg.Type == TypeState || msg.Type == TypeAuth) && msg.State != nil && predicate(msg.State)")
 			return msg.State, nil
 		}
 	}
@@ -362,13 +365,15 @@ func test世界首领跨图协同() {
 		_ = clientB.send(Message{Type: TypeBossAttack})
 	}()
 	wg.Wait()
-
+	//
 	expectedHP := initialHP - damageA - damageB
 	stateA, err = clientA.waitState(5*time.Second, func(state *WorldState) bool {
 		return state.Boss.HP == expectedHP && strings.Contains(strings.Join(state.Events, " "), userA) && strings.Contains(strings.Join(state.Events, " "), userB)
 	})
-	check("A 看到共享血量与广播", err == nil, errString(err))
+
+	check(fmt.Sprintf("A 看到共享血量与广播,expectedHP=%d,fact=%d", expectedHP, stateA.Boss.HP), err == nil, errString(err))
 	if err != nil {
+		fmt.Println(err)
 		return
 	}
 	stateB, err = clientB.waitState(5*time.Second, func(state *WorldState) bool {

@@ -1,1 +1,53 @@
-{}
+{
+  "": {
+    "username": "",
+    "password_hash": "",
+    "last_map": "cave",
+    "last_node": "node-b",
+    "x": 0,
+    "y": 0,
+    "hp": 0,
+    "max_hp": 0,
+    "attack": 0,
+    "potions": 0,
+    "treasures": 0,
+    "kills": 0,
+    "deaths": 0,
+    "victories": 0,
+    "alive": false
+  },
+  "sl2": {
+    "username": "sl2",
+    "password_hash": "7a9767fb84376073d114bbe4699ca34f6a676f529282d4980a203004f26756bb",
+    "last_map": "green",
+    "last_node": "node-a",
+    "x": 52,
+    "y": 22,
+    "hp": 78,
+    "max_hp": 120,
+    "attack": 35,
+    "potions": 2,
+    "treasures": 13263,
+    "kills": 4,
+    "deaths": 6,
+    "victories": 13200,
+    "alive": true
+  },
+  "sl3": {
+    "username": "sl3",
+    "password_hash": "927ee091a46aadb6121938bec102ec1e00ac9b849f6bd64243813b54d0c4aa3b",
+    "last_map": "green",
+    "last_node": "node-a",
+    "x": 52,
+    "y": 20,
+    "hp": 120,
+    "max_hp": 120,
+    "attack": 35,
+    "potions": 3,
+    "treasures": 8785,
+    "kills": 2,
+    "deaths": 2,
+    "victories": 8780,
+    "alive": true
+  }
+}

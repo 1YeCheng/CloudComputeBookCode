@@ -63,7 +63,21 @@ func main() {
 	// ╚═══════════════════════════════════════════════════════════════════╝
 
 	// TODO D-1: 在此处启动广播 Goroutine
-	_ = time.Millisecond // 防止 import 报错，实现后可删除
+	go func() {
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		for range ticker.C {
+			snapshot := w.GetSnapshot()
+			if len(snapshot) == 0 {
+				continue
+			}
+			w.BroadcastAll(protocol.Message{
+				Type:    protocol.TypeBroadcast,
+				Players: snapshot,
+			})
+		}
+	}()
+	//_ = time.Millisecond // 防止 import 报错，实现后可删除
 
 	// 主循环：持续接受新连接
 	for {
