@@ -9,28 +9,34 @@
 
 ```
 ch3/
-├── go.mod                          # 独立模块 ch3
-├── README.md                       # ← 本文件
-├── 双雄对决演示实验.md              # 实验要求
+├── go.mod                              # 独立模块 ch3
+├── README.md                           # ← 本文件
+├── 双雄对决演示实验.md                  # 实验要求
 ├── internal/
-│   ├── ch3proto/ch3proto.go        # 共享: 消息结构体 + sendJSON/recvJSON + JoinMsg
-│   ├── ch3game/ch3game.go          # 共享: 确定性更新函数 DeterministicUpdate
-│   ├── ch3net/ch3net.go            # 共享: ReliableConn (SetReadDeadline 封装)
-│   └── ch3render/ch3render.go      # 共享: 地图渲染与状态格式化
+│   ├── ch3proto/ch3proto.go            # 共享: 消息结构体 + sendJSON/recvJSON + JoinMsg
+│   ├── ch3game/ch3game.go              # 共享: 确定性更新函数 DeterministicUpdate
+│   ├── ch3net/ch3net.go                # 共享: ReliableConn (SetReadDeadline 封装)
+│   └── ch3render/ch3render.go          # 共享: 地图渲染与状态格式化
 └── cmd/
-    ├── exp1/loop/                  # ① 单机游戏主循环
-    ├── exp2/socket_server/         # ② TCP Socket 服务端
-    ├── exp2/socket_client/         # ② TCP Socket 客户端
-    ├── exp3/framing_demo/          # ③ 长度前缀+JSON 粘包解决
-    ├── exp4/p2p_lockstep_host/     # ④ P2P 锁步 Host
-    ├── exp4/p2p_lockstep_client/   # ④ P2P 锁步 Client
-    ├── exp5/cs_blocking_server/    # ⑤ 阻塞服务器 (对照组)
-    ├── exp5/cs_concurrent_server/  # ⑤ 并发服务器 (goroutine)
-    ├── exp5/cs_client/             # ⑤ 通用客户端
-    ├── exp6/authoritative_server/  # ⑥ 权威服务器
-    ├── exp6/authoritative_client/  # ⑥ 权威客户端 (只发输入+渲染)
-    ├── exp7/reliable_server/       # ⑦ ReliableConn 权威服务器
-    └── exp7/reliable_client/       # ⑦ ReliableConn 客户端 (非阻塞收包)
+    ├── README.md                       # cmd 子目录说明
+    ├── exp1/loop/                      # ① 单机游戏主循环
+    ├── exp2/socket_server/             # ② TCP Socket 服务端
+    ├── exp2/socket_client/             # ② TCP Socket 客户端
+    ├── exp3/game_sticky_packets/       # ③ 粘包灾难版（游戏演示）
+    ├── exp3/step3_sticky_packets/      # ③ 粘包灾难版（纯文本）
+    ├── exp3/step3_framing_demo/        # ③ 长度前缀+JSON 正确处理
+    ├── exp3/TCP_reliable/              # ③ TCP 可靠性演示（server/player1/player2）
+    ├── exp4/p2p_lockstep_host/         # ④ P2P 锁步 Host
+    ├── exp4/p2p_lockstep_client/       # ④ P2P 锁步 Client
+    ├── exp5/cs_blocking_server/        # ⑤ 阻塞服务器（对照组）
+    ├── exp5/cs_concurrent_server/      # ⑤ 并发服务器（goroutine）
+    ├── exp5/cs_client/                 # ⑤ 通用客户端
+    ├── exp5_1/zombie_server/           # ⑤.1 僵尸连接（半开连接）服务端
+    ├── exp5_1/zombie_client/           # ⑤.1 僵尸连接（半开连接）客户端
+    ├── exp6/authoritative_server/      # ⑥ 权威服务器
+    ├── exp6/authoritative_client/      # ⑥ 权威客户端（只发输入+渲染）
+    ├── exp7/reliable_server/           # ⑦ ReliableConn 权威服务器
+    └── exp7/reliable_client/           # ⑦ ReliableConn 客户端（非阻塞收包）
 ```
 
 ---
@@ -114,20 +120,73 @@ go run ./cmd/exp2/socket_client
 
 ### Step 3 — TCP 粘包与消息序列化（含正反面对比）
 
-**知识点**：TCP 是无边界的连续字节流（水管模型）；利用4 字节大端序长度前缀 + `json.Marshal`”制定应用层通信契约，解决网络底层的粘包与半包问题。
+**知识点**：TCP 是无边界的连续字节流；利用4 字节大端序长度前缀 + `json.Marshal`”制定应用层通信契约，解决网络底层的粘包与半包问题。
+除“TCP 字节流无边界导致粘包/半包”外，本步还通过 `TCP_reliable` 演示：`conn.Write` 返回成功不等于对端已真实处理；客户端断线重连后若无会话恢复与状态同步，容易出现“服务器判死、客户端满血重连”的状态冲突。
 
-**核心函数**：`sendJSON()`（`binary.Write` 写入 4 字节长度头） / `recvJSON()`（读取长度头 + `io.ReadFull` 精确截断字节流）
+**核心函数**：`sendJSON()` / `recvJSON()`（长度前缀拆包）；`net.Listen` + `listener.Accept`（连接管理）；`conn.Read` / `conn.Write`（演示断线广播与重连后的状态不一致问题）
 
-#### 演示粘包灾难版代码与正确处理版代码：
+#### 演示顺序（建议按 1 → 2 → 3）
+#### 演示 1：游戏化粘包现象（自动单机）
 
 ```powershell
-# 运行粘包灾难版代码 
-go run ./cmd/exp3/step3_sticky_packets
-
-# 运行正确处理版代码
-go run ./cmd/exp3/step3_framing_demo
-
+go run ./cmd/exp3/game_sticky_packets
 ```
+
+**现象**：第一条移动可被解析，后续两条在底层合并后形成连体 JSON，触发解析错误，角色停在中间帧。
+
+#### 演示 2：纯文本粘包灾难版（两个终端）
+
+```powershell
+# 终端1：服务端（故意用 conn.Read 直接读裸流，不做消息边界）
+go run ./cmd/exp3/step3_sticky_packets/server.go
+
+# 终端2：客户端（连续发送多条 JSON，未加长度头）
+go run ./cmd/exp3/step3_sticky_packets/client.go
+```
+
+在mac系统中，可以通过如下命令来关闭回环网卡从而模拟网络故障：
+```shell
+sudo ifconfig lo0 down
+```
+
+通过下面的命令恢复：
+```shell
+sudo ifconfig lo0 up
+```
+
+检验回环网卡是否关闭：
+```shell
+ping 127.0.0.1
+```
+
+#### 演示 3：长度前缀 + JSON 正确版（两个终端）
+
+```powershell
+# 终端1：服务端（recvJSON 按长度拆包）
+go run ./cmd/exp3/step3_framing_demo/server.go
+
+# 终端2：客户端（sendJSON 先写长度头再写 payload）
+go run ./cmd/exp3/step3_framing_demo/client.go
+```
+
+**现象**：即使连续发送消息，服务端仍能按条稳定解包并逐条打印。
+
+#### 演示 4：TCP_reliable（三个终端，重连状态冲突演示）
+
+```powershell
+# 终端1：服务器
+go run ./cmd/exp3/TCP_reliable/server.go
+
+# 终端2：玩家1（正常）
+go run ./cmd/exp3/TCP_reliable/player1.go
+
+# 终端3：玩家2（先断线再重连）
+go run ./cmd/exp3/TCP_reliable/player2.go
+```
+
+**观察点**：
+1. 玩家1会收到“Player2 DEAD”状态广播。
+2. 玩家2断线后重连，服务端会检测到“新连接”，并打印状态冲突提示（用于讲解仅靠 TCP 连接可靠性不足以保证游戏状态一致性）。
 
 ---
 
@@ -193,23 +252,42 @@ go run ./cmd/exp4/p2p_lockstep_client 192.168.x.x
 
 ```powershell
 # === 阻塞服务器（9105）===
-# 终端1
+# 终端1（先启动）
 go run ./cmd/exp5/cs_blocking_server
 
-# 终端2/3/4 — 启动3个客户端
+# 终端2（先连上并持续交互，不要立刻退出）
 go run ./cmd/exp5/cs_client 127.0.0.1 9105
 
-# 观察：只有第1个客户端能交互；后续客户端会收到“服务器忙/排队中”提示
+# 终端3/4（随后再启动）
+go run ./cmd/exp5/cs_client 127.0.0.1 9105
+
+# 观察：只有终端2能持续交互；终端3/4会收到“服务器忙/排队中”提示
 
 # === 并发服务器（9106）===
-# 终端1
+# 终端1（重开一个新服务）
 go run ./cmd/exp5/cs_concurrent_server
 
-# 终端2/3/4
+# 终端2/3/4 再次分别连接
 go run ./cmd/exp5/cs_client 127.0.0.1 9106
 
 # 观察：3个客户端同时交互，互不阻塞
 ```
+
+#### 课堂演示口径
+
+1. 先讲阻塞版：服务端一次只处理一个连接，后来的连接只能排队。
+2. 让终端2持续输入，确认它“独占”了服务端处理能力。
+3. 启动终端3/4，强调它们连接到了端口，但业务处理被前一个客户端阻塞。
+4. 切换到并发版后，重复同样操作，展示三个客户端都可同时交互。
+
+#### 预期现象
+
+1. 阻塞版（9105）：
+    - 第一个客户端响应正常。
+    - 后续客户端提示忙碌/排队，体感明显延迟或无法进入交互。
+2. 并发版（9106）：
+    - 多客户端可同时收发。
+    - 一个客户端慢操作不会阻塞其他客户端。
 
 #### 多机运行
 
@@ -308,18 +386,30 @@ go run ./cmd/exp6/authoritative_client 192.168.x.x
 
 **知识点**：`ReliableConn` 封装 `SetReadDeadline` 实现超时非阻塞收包；即使丢帧/延迟，主循环继续运行。
 
+本步骤重点验证三件事：
+1. 使用长度前缀 + JSON，避免 TCP 粘包/半包导致的反序列化错位。
+2. 客户端出现丢帧/延迟时不会“假死”或状态崩坏；服务器端某帧收不到输入也不会阻塞主循环。
+3. 客户端与服务器都采用超时读取，超时时本帧按“无输入/无新状态”处理，循环继续。
+
 **输入方式**：客户端也已改为 **raw 模式单键输入**，无需回车。
 
 - `w/a/s/d`：移动
 - `j`：攻击
 - `q`：主动退出客户端
+- `t`：切换“本地丢帧模拟”（客户端主动跳过部分收包）
+- `p`：切换“防粘包开关”（ON=长度前缀正确解析，OFF=模拟无边界解析）
+- `u`：触发“突发发送测试”（客户端一次性快速发送多条输入消息）
 
 **核心结构**（见 `internal/ch3net/ch3net.go`）：
 
 ```go
-type ReliableConn struct { conn net.Conn }
-func (rc *ReliableConn) Send(v any) error          // SendJSON 封装
-func (rc *ReliableConn) Recv(timeout, out) error    // SetReadDeadline + RecvJSON
+type ReliableConn struct {
+    conn    net.Conn
+    writeMu sync.Mutex
+}
+func (rc *ReliableConn) Send(v any) error
+func (rc *ReliableConn) SendTimeout(timeout time.Duration, v any) error
+func (rc *ReliableConn) Recv(timeout, out) error
 ```
 
 #### 单机运行（3个终端）
@@ -350,7 +440,29 @@ go run ./cmd/exp7/reliable_client 192.168.x.x 0
 2. **模拟掉线**：关闭一个客户端窗口，服务器不会停止，另一个客户端也不会把服务器拖死
 3. 使用相同 `playerID`（如 `0` 或 `1`）重连后，玩家会恢复到掉线前的位置和血量
 4. 控制台会渲染地图；掉线玩家会被标记为离线，重连后重新回到地图中
-5. 与 Step4 对比，可以明显看出：这里使用了超时机制后，主循环不会因某个客户端异常而卡住
+5. 在任一客户端按 `u` 可触发突发发送，观察高频消息流下依旧正常解析
+6. 与 Step4 对比，可以明显看出：这里使用了超时机制后，主循环不会因某个客户端异常而卡住
+
+#### 三种鲁棒性演示（课堂建议按此顺序）
+
+1. 粘包/序列化正确性
+    - 操作：正常启动 server + 两个 client；在某个 client 先按 `p` 关闭防粘包，再按 `u` 触发突发发送。
+    - 观察（`p=OFF`）：界面会出现明显的状态卡顿/更新丢失，模拟无边界解析下的粘包灾难。
+    - 再操作：再次按 `p` 打开防粘包，再按 `u`。
+    - 观察（`p=ON`）：角色会连续位移/攻击，界面稳定。
+    - 原因：通信统一走长度前缀 + JSON（`SendJSON/RecvJSON`），即使底层出现粘包/半包也能正确拆包。
+
+2. 丢帧/延迟不致命（客户端与服务器）
+    - 操作A（客户端侧）：在某个客户端按 `t` 开启本地丢帧模拟。
+    - 观察A：该客户端画面更新会变稀疏，但不会掉线；关闭 `t` 后可继续同步。
+    - 操作B（服务器侧）：让某个客户端短时间不操作，或临时关闭一个客户端。
+    - 观察B：服务器 frame 日志继续增长；另一个在线客户端仍可正常交互。
+    - 结论：单帧收不到输入只会按“该帧无输入”处理，不会阻塞主循环。
+
+3. 读取超时与非阻塞
+    - 操作：观察 server/client 代码中的 `Recv(timeout, ...)` 路径（server 500ms，client 50ms），并在运行时制造短暂无输入窗口。
+    - 观察：超时分支只会跳过本次读取，循环继续；不会出现“卡死等包”。
+    - 结论：超时机制将“网络等待”从阻塞问题降级为“本帧无新数据”。
 
 **规则说明**：
 
@@ -358,6 +470,7 @@ go run ./cmd/exp7/reliable_client 192.168.x.x 0
 2. 服务端会保留该玩家的状态（位置、血量）
 3. 客户端必须使用固定 `playerID`（如 0/1）来重连并恢复之前状态，不能依赖重连顺序自动分配
 4. 地图渲染会显示当前在线/离线玩家，逻辑更直观
+5. 服务器广播对单个慢连接采用发送超时；慢连接最多丢帧，不会长期拖慢整个主循环
 
 ---
 
