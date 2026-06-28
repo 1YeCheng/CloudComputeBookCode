@@ -1,5 +1,19 @@
 # Lab4：自建 Kubernetes 游戏部署实验
 
+> Portfolio note: this Kubernetes deployment achieved **98/100** in the Lab4
+> score test, covering autoscaling, state consistency, fault recovery, and
+> resource utilization.
+
+## 验证结果
+
+自动测试覆盖 Kubernetes 资源、Service、HPA、Redis、游戏入口、状态检查、Pod 删除恢复和 checkpoint 恢复。
+
+<img src="images/lab4-autotest-pass.png" alt="Lab4 autotest passed" width="760">
+
+评分测试结果为 **98/100**。
+
+<img src="images/lab4-scoretest-98.png" alt="Lab4 score test result: 98 out of 100" width="760">
+
 本实验要求你把一个分布式文字游戏部署到自己配置的 Kubernetes 集群上，并让它具备自动扩缩容、基础异常恢复、状态一致性和较好的资源利用率。
 
 ---
