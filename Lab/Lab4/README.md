@@ -1,203 +1,214 @@
-# Lab4：自建 Kubernetes 游戏部署实验
+# Lab 4: Self-Managed Kubernetes Deployment for a Distributed Game
 
-> Portfolio note: this Kubernetes deployment achieved **98/100** in the Lab4
-> score test, covering autoscaling, state consistency, fault recovery, and
-> resource utilization.
+## Implementation Summary
 
-## 验证结果
+In my Lab4 implementation, the distributed game backend was deployed with one
+gateway, one coordinator, three independent map services, and Redis-backed
+shared state. The Kubernetes deployment used HPA for the five business
+services, while Redis was kept as a StatefulSet without HPA to avoid state
+inconsistency.
 
-自动测试覆盖 Kubernetes 资源、Service、HPA、Redis、游戏入口、状态检查、Pod 删除恢复和 checkpoint 恢复。
+The **98/100** score was supported by several concrete deployment choices. HPA
+was configured for the gateway, coordinator, and all three map services with
+CPU requests set for each workload, allowing the scorer to observe scale-out
+under pressure while avoiding unnecessary scaling when the system was idle.
+Readiness and liveness probes were added to each business service, and preStop
+hooks called the service drain endpoint before Pod termination so that traffic
+could be removed from a Pod before it exited. Redis was used to persist user
+sessions, shared game state, map checkpoints, and leader information, allowing
+the system to recover after Pod deletion or checkpoint-restoration tests.
+RBAC permissions allowed business Pods to update lifecycle annotations such as
+pod-deletion-cost and draining state, which helped Kubernetes prefer less
+disruptive Pods during scale-down or recycling.
+
+## Validation Results
+
+The automated test covers Kubernetes resources, Services, HPA, Redis, the game entry point, state checks, recovery after Pod deletion, and checkpoint recovery.
 
 <img src="images/lab4-autotest-pass.png" alt="Lab4 autotest passed" width="760">
 
-评分测试结果为 **98/100**。
+The score test result is **98/100**.
 
 <img src="images/lab4-scoretest-98.png" alt="Lab4 score test result: 98 out of 100" width="760">
 
-本实验要求你把一个分布式文字游戏部署到自己配置的 Kubernetes 集群上，并让它具备自动扩缩容、基础异常恢复、状态一致性和较好的资源利用率。
+This lab requires deploying a distributed text-based game to a self-managed Kubernetes cluster. The deployment should support autoscaling, basic fault recovery, state consistency, and reasonable resource utilisation.
 
 ---
 
-**【重要评分导向】**
+**Important scoring principle**
 
-**本实验不鼓励简单堆叠资源。功能正确、服务稳定是基础；在此前提下，花费越少、实验得分越高。**
+**This lab does not reward simply allocating excessive resources. Correct functionality and stable service are the baseline; under that condition, lower resource cost leads to a higher score.**
 
 ---
 
-实验提供游戏源码和测试脚本。你需要自己完成 Dockerfile、Kubernetes YAML、镜像构建、镜像分发、部署验证和性能调优。
+The lab provides the game source code and test scripts. You need to complete the Dockerfiles, Kubernetes YAML files, image build, image distribution, deployment verification, and performance tuning.
 
-为了避免混淆，本文统一使用下面几个说法：
+To avoid ambiguity, this document uses the following terms:
 
-| 名称 | 含义 |
+| Term | Meaning |
 | --- | --- |
-| 本机 | 你自己的电脑，例如 Windows、macOS 或 Linux 笔记本 |
-| 主节点 | Kubernetes control-plane 节点，通常可以从本机远程登录 |
-| worker 节点 | Kubernetes 工作节点，通常只有内网 IP，Pod 主要运行在这些节点上 |
-| 集群节点 | 主节点和 worker 节点的统称 |
+| Local machine | Your own computer, such as a Windows, macOS, or Linux laptop |
+| Master node | The Kubernetes control-plane node, usually accessible from your local machine through SSH |
+| Worker node | A Kubernetes worker node, usually with only a private IP address; most Pods run on these nodes |
+| Cluster nodes | A collective term for the master node and worker nodes |
 
-## 1. 实验目标
+## 1. Lab Objective
 
-最终你需要在自己的 Kubernetes 集群中部署出下面这套服务：
+The final deployment in your Kubernetes cluster should contain the following services:
 
 ```text
-命名空间：lab4
-外部入口：<可访问的节点地址>:30910
+Namespace: lab4
+External entry point: <reachable-node-address>:30910
 
-业务组件：
+Business components:
 lab4-gateway
 lab4-coordinator
 lab4-map-green
 lab4-map-cave
 lab4-map-ruins
 
-状态组件：
+State component:
 lab4-redis
 
-弹性伸缩：
-5 个业务 Deployment 都需要配置 HPA
-HPA minReplicas=1
-HPA maxReplicas=10
-Redis 不需要配置 HPA
+Autoscaling:
+All five business Deployments must be configured with HPA.
+HPA minReplicas = 1
+HPA maxReplicas = 10
+Redis should not be configured with HPA.
 ```
 
-部署完成后，客户端应该可以通过下面的地址连接游戏：
+After deployment, the client should be able to connect to the game through:
 
 ```text
-<节点地址>:30910
+<node-address>:30910
 ```
 
-例如：
+Example:
 
 ```text
 203.0.113.10:30910
 ```
 
-## 2. 前置资料
+## 2. Prerequisite Materials
 
-如果你还没有完成租服务器、安装 Docker 或配置 Kubernetes 集群，请先参考：
+If you have not yet rented servers, installed Docker, or configured a Kubernetes cluster, prepare the base environment first. The original course slides and cloud-cluster setup notes are not included in this public repository.
 
-- [Docker 上云实战](./Docker上云实战.pptx)
-- [K8s 使用](./k8s使用.pptx)
-- [阿里云 K8s 集群搭建指南](./阿里云%20K8s%20集群搭建指南.md)
+These materials cover the base environment. This README focuses on what needs to be completed for Lab4 itself.
 
-其中 [阿里云 K8s 集群搭建指南](./阿里云%20K8s%20集群搭建指南.md) 是集群搭建指南，metrics-server 的安装或修复也可以参考它。
+## 3. Optional: Configure Local kubeconfig
 
-这几个资料只负责基础环境。本 README 重点说明 Lab4 本身要做什么。
+`kubeconfig` is the configuration file used by `kubectl` to connect to a Kubernetes cluster. It records the API Server address, certificates, and access credentials.
 
-## 3. 可选：配置本机 kubeconfig
+Configuring kubeconfig on your local machine allows you to run commands such as `kubectl get pods`, `kubectl apply -f ...`, and `watch ...` directly from your own computer, without logging in to the master node every time.
 
-kubeconfig 是 `kubectl` 连接 Kubernetes 集群时使用的配置文件。它里面记录了 API Server 地址、证书和访问凭据。
+This step is optional. Even if local kubeconfig is not configured, the basic tests and score scripts can still run. When necessary, the test scripts will fall back to remote-login mode and ask for the master node address, username, and SSH port.
 
-配置本机 kubeconfig 的好处是：你可以直接在自己的电脑上运行 `kubectl get pods`、`kubectl apply -f ...`、`watch ...` 等命令，不用每次都远程登录到主节点。
+If you want to control the cluster directly from your local machine, follow the steps below.
 
-这一步是可选的。即使你没有配置本机 kubeconfig，也不影响基础测试和评分脚本；测试脚本会在需要时退回远程登录模式，让你输入主节点地址、登录用户名、连接端口等信息。
+1. Install `kubectl` locally.
 
-如果你想在本机直接控制集群，可以按下面流程尝试。
+2. Copy kubeconfig from the master node.
 
-1. 在本机安装 `kubectl`。
-
-2. 从主节点复制 kubeconfig。
-
-Linux/macOS：
+Linux/macOS:
 
 ```bash
 mkdir -p ~/.kube
-scp <服务器用户名>@<主节点地址>:/etc/kubernetes/admin.conf ~/.kube/config
+scp <server-username>@<master-node-address>:/etc/kubernetes/admin.conf ~/.kube/config
 chmod 600 ~/.kube/config
 ```
 
-Windows PowerShell：
+Windows PowerShell:
 
 ```powershell
 mkdir $HOME\.kube
-scp <服务器用户名>@<主节点地址>:/etc/kubernetes/admin.conf $HOME\.kube\config
+scp <server-username>@<master-node-address>:/etc/kubernetes/admin.conf $HOME\.kube\config
 ```
 
-3. 打开 kubeconfig，找到 `server:` 这一行。
+3. Open kubeconfig and find the `server:` line.
 
-它可能长这样：
+It may look like this:
 
 ```text
 server: https://10.0.1.10:6443
 ```
 
-如果你的电脑无法访问这个内网 IP，可以把它改成主节点地址：
+If your local machine cannot access this private IP address, replace it with the master node address:
 
 ```text
-server: https://<主节点地址>:6443
+server: https://<master-node-address>:6443
 ```
 
-4. 确认云平台网络规则允许你的电脑访问 `6443` 端口。
+4. Confirm that the cloud security rules allow your local machine to access port `6443`.
 
-建议只允许自己的电脑访问，不要对无关地址开放。
+It is recommended to allow access only from your own machine, rather than exposing the port broadly.
 
-5. 在本机测试：
+5. Test locally:
 
 ```bash
 kubectl get nodes -o wide
 kubectl get pods -A
 ```
 
-如果遇到证书错误、网络不通或云平台网络规则问题，不要在这里卡太久。你可以直接远程登录到主节点运行 `kubectl`，或者让测试脚本使用远程登录模式。本机 kubeconfig 只是为了方便，不是完成实验的必要条件。
+If you encounter certificate errors, network issues, or cloud security-rule problems, do not spend too much time on this step. You may log in to the master node and run `kubectl` there, or let the test scripts use remote-login mode. Local kubeconfig is for convenience only and is not required to complete the lab.
 
-## 4. 开始前检查
+## 4. Pre-Deployment Checks
 
-在正式部署 Lab4 之前，先确认 Kubernetes 集群本身是好的。
+Before deploying Lab4, verify that the Kubernetes cluster itself is working.
 
-如果你已经配置了本机 kubeconfig，可以在本机执行。否则远程登录到主节点执行。
+If local kubeconfig has been configured, run the following commands locally. Otherwise, log in to the master node and run them there.
 
 ```bash
 kubectl get nodes -o wide
 kubectl get pods -A
 ```
 
-你应该看到所有节点都是 `Ready`。
+All nodes should be `Ready`.
 
-HPA 依赖 metrics-server。请继续检查：
+HPA depends on metrics-server. Continue checking:
 
 ```bash
 kubectl top nodes
 kubectl top pods -A
 ```
 
-如果 `kubectl top` 报错，说明 metrics-server 没有安装好，HPA 评分会受影响。metrics-server 的安装或修复请参考 [阿里云 K8s 集群搭建指南](./阿里云%20K8s%20集群搭建指南.md)。
+If `kubectl top` reports an error, metrics-server is not installed or not functioning correctly, and HPA-related scoring will be affected. Install or repair metrics-server before running the score test.
 
-## 5. 分步完成实验
+## 5. Step-by-Step Lab Procedure
 
-下面按照真正做实验的顺序说明。建议你一步一步完成，不要一上来就直接写一大堆 YAML。
+The following steps follow the actual order in which the lab should be completed. It is recommended to proceed step by step rather than writing all YAML files at once.
 
-### 第一步：把 Lab4 代码传到主节点
+### Step 1: Copy the Lab4 Code to the Master Node
 
-在哪里做：本机。
+Where to do this: local machine.
 
-为什么做：本实验建议在云服务器上构建镜像，不建议在本机电脑构建镜像。这样可以避免本机架构、网络、Docker 环境和服务器不一致带来的问题。
+Why: this lab recommends building images on the cloud server rather than on the local machine. This avoids inconsistencies in CPU architecture, network access, Docker environment, and server runtime.
 
-如果你的主节点可以从本机访问，可以直接传：
+If the master node is reachable from your local machine, copy the directory directly:
 
 ```bash
-scp -r Lab4 <服务器用户名>@<主节点地址>:~/Lab4
+scp -r Lab4 <server-username>@<master-node-address>:~/Lab4
 ```
 
-然后登录主节点：
+Then log in to the master node:
 
 ```bash
-ssh <服务器用户名>@<主节点地址>
+ssh <server-username>@<master-node-address>
 cd ~/Lab4
 ```
 
-如果你已经在主节点上下载或解压了 Lab4，只需要进入目录：
+If Lab4 has already been downloaded or extracted on the master node, simply enter the directory:
 
 ```bash
 cd ~/Lab4
 ```
 
-完成后验证：
+Verify the directory:
 
 ```bash
 ls
 ```
 
-你应该能看到：
+You should see:
 
 ```text
 cmd
@@ -209,21 +220,21 @@ go.mod
 README.md
 ```
 
-### 第二步：理解要启动哪些程序
+### Step 2: Understand Which Programs Need to Start
 
-在哪里做：主节点。
+Where to do this: master node.
 
-为什么做：写 Dockerfile 和 YAML 之前，需要先知道每个容器到底应该启动哪个 Go 程序。
+Why: before writing Dockerfiles and YAML, you need to know which Go program each container should start.
 
-本实验有 3 类业务程序：
+There are three types of business programs in this lab:
 
 ```text
 gateway       -> ./cmd/cloud-gateway
 coordinator  -> ./cmd/cloud-coordinator
-map          -> ./cmd/cloud-map
+map           -> ./cmd/cloud-map
 ```
 
-其中 map 程序会被部署成 3 个地图服务：
+The map program is deployed as three map services:
 
 ```text
 lab4-map-green
@@ -231,13 +242,13 @@ lab4-map-cave
 lab4-map-ruins
 ```
 
-它们可以共用同一个 map 镜像，通过环境变量区分地图。
+They can share the same map image and be distinguished through environment variables.
 
-客户端请求的大致路径是：
+The approximate request path is:
 
 ```text
 client
-  -> <节点地址>:30910
+  -> <node-address>:30910
   -> lab4-gateway Service
   -> gateway Pod
   -> lab4-coordinator Service
@@ -247,24 +258,24 @@ client
   -> Redis
 ```
 
-各组件职责如下：
+Component responsibilities:
 
-| 组件 | 作用 |
+| Component | Role |
 | --- | --- |
-| gateway | 对外暴露 TCP 游戏入口，维护客户端连接，把玩家操作转发给 coordinator |
-| coordinator | 处理登录、玩家会话、地图路由、跨地图操作、交易等全局逻辑 |
-| map-green | green 地图服务，处理该地图内移动、拾取、互动等逻辑 |
-| map-cave | cave 地图服务 |
-| map-ruins | ruins 地图服务 |
-| Redis | 保存用户数据、会话数据、地图 checkpoint、leader 租约等状态 |
+| gateway | Exposes the external TCP game entry point, maintains client connections, and forwards player actions to the coordinator |
+| coordinator | Handles login, player sessions, map routing, cross-map actions, trading, and other global logic |
+| map-green | Map service for the green map, handling movement, pickup, and interaction within that map |
+| map-cave | Map service for the cave map |
+| map-ruins | Map service for the ruins map |
+| Redis | Stores user data, session data, map checkpoints, leader leases, and related state |
 
-### 第三步：编写 Dockerfile
+### Step 3: Write Dockerfiles
 
-在哪里做：主节点的 `~/Lab4` 目录。
+Where to do this: `~/Lab4` on the master node.
 
-为什么做：Kubernetes 运行的是容器，不是直接运行 Go 源码。你需要把 gateway、coordinator、map 分别做成镜像。
+Why: Kubernetes runs containers rather than Go source code directly. You need to package gateway, coordinator, and map as images.
 
-建议至少编写 3 个 Dockerfile：
+It is recommended to write at least three Dockerfiles:
 
 ```text
 Dockerfile.gateway
@@ -272,49 +283,49 @@ Dockerfile.coordinator
 Dockerfile.map
 ```
 
-推荐使用多阶段构建：
+A multi-stage build is recommended:
 
 ```text
-第一阶段：使用 golang 镜像编译 Go 二进制
-第二阶段：使用 alpine、distroless 或 scratch 放入编译好的二进制
+Stage 1: use a golang image to compile the Go binary.
+Stage 2: use alpine, distroless, or scratch to package the compiled binary.
 ```
 
-国内网络直连 Docker Hub 可能不稳定。推荐在 Dockerfile 的构建阶段优先使用下面这个 Go 镜像源：
+Direct access to Docker Hub may be unstable in mainland China. It is recommended to use the following Go image mirror in the build stage:
 
 ```text
 m.daocloud.io/docker.io/library/golang:1.21-alpine
 ```
 
-例如你可以在 Dockerfile 中写：
+For example:
 
 ```dockerfile
 ARG GO_BUILDER_IMAGE=m.daocloud.io/docker.io/library/golang:1.21-alpine
 FROM ${GO_BUILDER_IMAGE} AS builder
 ```
 
-你需要保证容器启动时执行的是正确入口：
+Ensure that each container starts the correct entry:
 
 ```text
 gateway       -> ./cmd/cloud-gateway
 coordinator  -> ./cmd/cloud-coordinator
-map          -> ./cmd/cloud-map
+map           -> ./cmd/cloud-map
 ```
 
-如果主节点安装了 Go，也可以先检查源码：
+If Go is installed on the master node, you may check the source code first:
 
 ```bash
 go test ./...
 ```
 
-没有安装 Go 也没关系，只要你的 Dockerfile 能在构建阶段用 Go 镜像完成编译即可。
+If Go is not installed, it is still acceptable as long as the Dockerfile compiles the code in the build stage using the Go image.
 
-### 第四步：在主节点构建镜像
+### Step 4: Build Images on the Master Node
 
-在哪里做：主节点的 `~/Lab4` 目录。
+Where to do this: `~/Lab4` on the master node.
 
-为什么做：把源码变成 Kubernetes 可以运行的镜像。本实验建议镜像在服务器上构建，不要求在本机电脑上构建。
+Why: this converts the source code into images that Kubernetes can run. This lab recommends building images on the server and does not require local image builds.
 
-示例命令：
+Example commands:
 
 ```bash
 docker build -t lab4-gateway:v1 -f Dockerfile.gateway .
@@ -322,23 +333,23 @@ docker build -t lab4-coordinator:v1 -f Dockerfile.coordinator .
 docker build -t lab4-map:v1 -f Dockerfile.map .
 ```
 
-Redis 可以使用 `redis:7-alpine`。国内网络建议先从 DaoCloud 代理源拉取，再 tag 回标准镜像名，这样后面的 `docker save` 和 YAML 可以继续统一写 `redis:7-alpine`：
+Redis can use `redis:7-alpine`. If network access is unstable, pull it through the DaoCloud mirror and tag it back to the standard image name, so that subsequent `docker save` and YAML files can still use `redis:7-alpine`:
 
 ```bash
 docker pull m.daocloud.io/docker.io/library/redis:7-alpine
 docker tag m.daocloud.io/docker.io/library/redis:7-alpine redis:7-alpine
 ```
 
-如果你的服务器能稳定访问 Docker Hub，也可以直接执行 `docker pull redis:7-alpine`。
+If your server can access Docker Hub reliably, you may run `docker pull redis:7-alpine` directly.
 
-完成后验证：
+Verify after building:
 
 ```bash
 docker images | grep lab4
 docker images | grep redis
 ```
 
-你应该至少能看到：
+You should at least see:
 
 ```text
 lab4-gateway:v1
@@ -347,62 +358,62 @@ lab4-map:v1
 redis:7-alpine
 ```
 
-### 第五步：把镜像导入 Kubernetes 运行时
+### Step 5: Import Images into the Kubernetes Runtime
 
-在哪里做：主节点，以及所有可能运行 Pod 的 worker 节点。
+Where to do this: the master node and all worker nodes that may run Pods.
 
-为什么做：`docker images` 里有镜像，不代表 Kubernetes 一定能用到。很多集群使用 containerd 作为 Kubernetes 运行时，所以需要把镜像导入到 containerd 的 `k8s.io` 命名空间。
+Why: having images listed under `docker images` does not guarantee that Kubernetes can use them. Many clusters use containerd as the Kubernetes runtime, so images must be imported into the `k8s.io` namespace of containerd.
 
-先在主节点导出镜像包：
+First export the image bundle on the master node:
 
 ```bash
 docker save -o ~/lab4-images.tar lab4-gateway:v1 lab4-coordinator:v1 lab4-map:v1 redis:7-alpine
 ```
 
-在主节点导入到 containerd：
+Import it into containerd on the master node:
 
 ```bash
 ctr -n k8s.io images import ~/lab4-images.tar
 ```
 
-然后把镜像包分发到每个 worker 节点。注意这里使用的是 worker 内网 IP，因为主节点通常可以访问 worker 内网。
+Then distribute the image bundle to each worker node. Use the worker's private IP address, as the master node can usually access the worker private network.
 
 ```bash
-scp ~/lab4-images.tar <服务器用户名>@<worker内网IP>:~/lab4-images.tar
-ssh <服务器用户名>@<worker内网IP> "ctr -n k8s.io images import ~/lab4-images.tar"
+scp ~/lab4-images.tar <server-username>@<worker-private-IP>:~/lab4-images.tar
+ssh <server-username>@<worker-private-IP> "ctr -n k8s.io images import ~/lab4-images.tar"
 ```
 
-如果你有 3 个 worker 节点，就对 3 个 worker 都执行一次。
+If there are three worker nodes, run this once for each worker.
 
-完成后可以在每个节点验证：
+Verify on each node:
 
 ```bash
 ctr -n k8s.io images ls | grep lab4
 ctr -n k8s.io images ls | grep redis
 ```
 
-如果节点安装了 `crictl`，也可以用：
+If `crictl` is installed, you may also use:
 
 ```bash
 crictl images | grep lab4
 crictl images | grep redis
 ```
 
-如果你决定使用镜像仓库，也可以把镜像 push 到自己的仓库，然后在 YAML 中写完整镜像地址。镜像仓库相关流程可以参考 [Docker 上云实战](./Docker上云实战.pptx)。本实验 README 默认推荐 `scp + ctr import`，因为它对初学者更直接。
+If you decide to use an image registry, you can push images to your registry and reference the full image address in YAML. This README recommends `scp + ctr import` by default because it is more direct for beginners.
 
-### 第六步：编写 Kubernetes YAML
+### Step 6: Write Kubernetes YAML
 
-在哪里做：主节点的 `~/Lab4` 目录。
+Where to do this: `~/Lab4` on the master node.
 
-为什么做：YAML 描述了 Kubernetes 应该创建哪些资源、每个 Pod 用哪个镜像、暴露哪些端口、如何扩缩容。
+Why: YAML describes which resources Kubernetes should create, which image each Pod should use, which ports to expose, and how scaling should work.
 
-建议新建一个目录存放 YAML：
+Create a directory for YAML files:
 
 ```bash
 mkdir -p deploy
 ```
 
-你至少需要编写这些资源：
+At minimum, the following resources are required:
 
 ```text
 Namespace
@@ -421,36 +432,36 @@ Service: map-green
 Service: map-cave
 Service: map-ruins
 Service: redis
-HorizontalPodAutoscaler: 5 个业务组件
+HorizontalPodAutoscaler: five business components
 ```
 
-写 YAML 时重点检查这些点：
+When writing YAML, pay particular attention to the following:
 
-- 所有资源都放在 `lab4` 命名空间。
-- YAML 中的 `image` 名字必须和第五步导入的镜像名一致，例如 `lab4-gateway:v1`。
-- 如果使用本地导入镜像，建议设置 `imagePullPolicy: IfNotPresent`。
-- gateway 使用 NodePort 暴露 `30910`。
-- coordinator、map、redis 使用 ClusterIP，只在集群内部访问。
-- 5 个业务 Deployment 都要配置 HPA。
-- Redis 使用 StatefulSet，不建议配置 HPA。
-- 每个业务容器都要配置 CPU requests，否则 HPA 可能无法计算 CPU 利用率。
-- 建议配置 readinessProbe、livenessProbe、preStop 和合理的 `terminationGracePeriodSeconds`。
+- Put all resources in the `lab4` namespace.
+- The `image` names in YAML must match the image names imported in Step 5, for example `lab4-gateway:v1`.
+- If locally imported images are used, set `imagePullPolicy: IfNotPresent`.
+- Expose the gateway through NodePort `30910`.
+- Use ClusterIP for coordinator, map, and Redis services so that they are accessible only inside the cluster.
+- Configure HPA for all five business Deployments.
+- Use a StatefulSet for Redis and do not configure HPA for Redis.
+- Configure CPU requests for every business container; otherwise HPA may not be able to calculate CPU utilisation.
+- Configure readinessProbe, livenessProbe, preStop, and a reasonable `terminationGracePeriodSeconds`.
 
-### 第七步：部署到 Kubernetes 集群
+### Step 7: Deploy to the Kubernetes Cluster
 
-在哪里做：主节点。
+Where to do this: master node.
 
-为什么做：把你写好的 YAML 应用到集群中。
+Why: apply the YAML files to the cluster.
 
-执行：
+Run:
 
 ```bash
 kubectl apply -f deploy/
 ```
 
-这条命令会按 `deploy/` 目录里的 YAML 原样部署资源。它不会自动替你选择镜像。
+This command deploys the resources exactly as described in the YAML files under `deploy/`. It does not choose images automatically.
 
-如果你的 YAML 里已经写好了真实镜像名，例如：
+If the YAML already contains the correct image names, for example:
 
 ```text
 image: lab4-gateway:v1
@@ -458,11 +469,11 @@ image: lab4-coordinator:v1
 image: lab4-map:v1
 ```
 
-并且这些镜像已经导入到所有可能运行 Pod 的节点，那么 `kubectl apply -f deploy/` 就可以直接部署。
+and these images have been imported into all nodes that may run Pods, then `kubectl apply -f deploy/` should deploy them directly.
 
-如果 YAML 里的 `image` 和你实际构建、导入的镜像名不一致，就需要先修改 YAML，或者部署后再用 `kubectl set image` 更新镜像。
+If the image names in YAML do not match the images you built and imported, modify the YAML first, or update the image after deployment with `kubectl set image`.
 
-查看资源：
+Inspect resources:
 
 ```bash
 kubectl -n lab4 get pods -o wide
@@ -471,9 +482,9 @@ kubectl -n lab4 get hpa -o wide
 kubectl -n lab4 get statefulset
 ```
 
-正常情况下，Pod 应该逐渐变成 `Running`，并且 `READY` 为 `1/1`。
+Normally, Pods should gradually become `Running` with `READY` shown as `1/1`.
 
-如果有问题，优先看：
+If there is a problem, check these first:
 
 ```bash
 kubectl -n lab4 describe pod <pod-name>
@@ -481,135 +492,135 @@ kubectl -n lab4 logs <pod-name>
 kubectl -n lab4 get events --sort-by=.lastTimestamp
 ```
 
-### 第八步：验证游戏入口
+### Step 8: Verify the Game Entry Point
 
-在哪里做：本机或主节点都可以。
+Where to do this: local machine or master node.
 
-为什么做：Pod Running 不代表游戏入口一定能访问。你还需要确认 NodePort、云平台网络规则、gateway、coordinator、map、Redis 都串起来了。
+Why: `Pod Running` does not necessarily mean the game entry point is reachable. You still need to confirm that NodePort, cloud security rules, gateway, coordinator, map services, and Redis are connected correctly.
 
-先确认 gateway Service：
+First check the gateway Service:
 
 ```bash
 kubectl -n lab4 get svc lab4-gateway
 ```
 
-它应该暴露：
+It should expose:
 
 ```text
 9310:30910/TCP
 ```
 
-确认云平台网络规则允许访问 `30910` 端口。
+Confirm that the cloud security rules allow access to port `30910`.
 
-然后用 admin 工具检查游戏状态：
-
-```bash
-go run ./cmd/admin 状态 <节点地址>:30910
-```
-
-也可以启动交互式客户端：
+Then use the admin tool to check game status:
 
 ```bash
-go run ./cmd/client <节点地址>:30910
+go run ./cmd/admin 状态 <node-address>:30910
 ```
 
-如果主节点没有 Go，可以在本机运行这些命令；只要本机能访问 `<节点地址>:30910` 即可。
+You can also start the interactive client:
 
-### 第九步：运行基础测试
+```bash
+go run ./cmd/client <node-address>:30910
+```
 
-在哪里做：本机或主节点都可以。
+If Go is not installed on the master node, run these commands locally instead, as long as your local machine can access `<node-address>:30910`.
 
-为什么做：基础测试用于判断你的部署是否成功、功能是否完整。它不追求区分度，主要检查“能不能跑”。
+### Step 9: Run Basic Tests
 
-Linux/macOS：
+Where to do this: local machine or master node.
+
+Why: the basic test checks whether the deployment succeeds and whether the core functions are complete. It mainly verifies that the system can run.
+
+Linux/macOS:
 
 ```bash
 ./test/run-autotest.sh
 ```
 
-Windows PowerShell：
+Windows PowerShell:
 
 ```powershell
 .\test\run-autotest.ps1
 ```
 
-如果脚本提示：
+If the script prompts:
 
 ```text
 Gateway address, for example 203.0.113.10:30910:
 ```
 
-请输入你的游戏入口：
+enter your game entry point:
 
 ```text
-<节点地址>:30910
+<node-address>:30910
 ```
 
-如果你的本机已经配置好 kubeconfig，脚本会直接访问 Kubernetes 集群检查资源。如果本机没有 kubeconfig，脚本会退回远程登录模式，提示你输入主节点地址、登录用户名、连接端口等信息。
+If local kubeconfig is configured, the script will directly access the Kubernetes cluster to check resources. If not, it will fall back to remote-login mode and ask for the master node address, username, SSH port, and related information.
 
-### 第十步：运行竞技评分并观察 HPA
+### Step 10: Run the Score Test and Observe HPA
 
-在哪里做：本机或主节点都可以。
+Where to do this: local machine or master node.
 
-为什么做：竞技评分用来区分不同同学的部署质量和调优效果，满分 100 分。
+Why: the score test distinguishes deployment quality and tuning effectiveness. The full mark is 100.
 
-运行：
+Run:
 
 ```bash
 ./test/run-scoretest.sh
 ```
 
-Windows PowerShell：
+Windows PowerShell:
 
 ```powershell
 .\test\run-scoretest.ps1
 ```
 
-调试时可以先跑快速模式：
+For debugging, use the fast mode first:
 
 ```bash
 LAB4_SCORE_FAST=1 LAB4_SKIP_CHAOS=1 ./test/run-scoretest.sh
 ```
 
-也可以手动指定游戏入口：
+You may also specify the game entry point manually:
 
 ```bash
-LAB4_GATEWAY_ADDR=<节点地址>:30910 ./test/run-scoretest.sh
+LAB4_GATEWAY_ADDR=<node-address>:30910 ./test/run-scoretest.sh
 ```
 
-评分时建议另开一个终端观察 HPA：
+During scoring, it is recommended to open another terminal to observe HPA:
 
 ```bash
 watch -n 0.5 'kubectl -n lab4 get pods,hpa -o wide'
 ```
 
-HPA 生效时通常会看到：
+When HPA is working, you will usually observe:
 
 ```text
-TARGETS 接近或超过 CPU 目标值
-REPLICAS 从 1 增加到更多
-新增 Pod 进入 Running
+TARGETS approaching or exceeding the CPU target
+REPLICAS increasing from 1 to a larger number
+New Pods entering Running state
 ```
 
-注意：竞技评分会真实触发 HPA 扩容。重复评分前建议等几分钟，让 HPA 缩回稳定状态，否则上一轮测试残留副本可能影响“空闲不误扩”。
+Note: the score test triggers real HPA scale-out. Before rerunning it, wait a few minutes for HPA to scale back to a stable state; otherwise residual replicas from the previous run may affect the idle no-over-scaling test.
 
-## 6. 部署总流程
+## 6. Deployment Summary
 
-如果你已经理解上面的每一步，可以按下面的总流程快速回顾。
+If you understand the steps above, the whole process can be summarised as follows.
 
-在本机：
+On the local machine:
 
 ```bash
-scp -r Lab4 <服务器用户名>@<主节点地址>:~/Lab4
-ssh <服务器用户名>@<主节点地址>
+scp -r Lab4 <server-username>@<master-node-address>:~/Lab4
+ssh <server-username>@<master-node-address>
 ```
 
-在主节点：
+On the master node:
 
 ```bash
 cd ~/Lab4
 
-# 编写 Dockerfile.gateway / Dockerfile.coordinator / Dockerfile.map
+# Write Dockerfile.gateway / Dockerfile.coordinator / Dockerfile.map
 docker build -t lab4-gateway:v1 -f Dockerfile.gateway .
 docker build -t lab4-coordinator:v1 -f Dockerfile.coordinator .
 docker build -t lab4-map:v1 -f Dockerfile.map .
@@ -619,29 +630,29 @@ docker tag m.daocloud.io/docker.io/library/redis:7-alpine redis:7-alpine
 docker save -o ~/lab4-images.tar lab4-gateway:v1 lab4-coordinator:v1 lab4-map:v1 redis:7-alpine
 ctr -n k8s.io images import ~/lab4-images.tar
 
-# 对每个 worker 节点执行
-scp ~/lab4-images.tar <服务器用户名>@<worker内网IP>:~/lab4-images.tar
-ssh <服务器用户名>@<worker内网IP> "ctr -n k8s.io images import ~/lab4-images.tar"
+# Run on each worker node
+scp ~/lab4-images.tar <server-username>@<worker-private-IP>:~/lab4-images.tar
+ssh <server-username>@<worker-private-IP> "ctr -n k8s.io images import ~/lab4-images.tar"
 
-# 编写 deploy/ 下的 Kubernetes YAML
+# Write Kubernetes YAML under deploy/
 kubectl apply -f deploy/
 
 kubectl -n lab4 get pods,svc,hpa -o wide
 ```
 
-验证：
+Verify:
 
 ```bash
-go run ./cmd/admin 状态 <节点地址>:30910
+go run ./cmd/admin 状态 <node-address>:30910
 ./test/run-autotest.sh
 ./test/run-scoretest.sh
 ```
 
-## 7. 资源名和端口要求
+## 7. Resource Names and Port Requirements
 
-测试脚本会按下面的名字查找资源，请保持一致。
+The test scripts look for resources using the following names. Keep them consistent.
 
-Deployment：
+Deployment:
 
 ```text
 lab4-gateway
@@ -651,13 +662,13 @@ lab4-map-cave
 lab4-map-ruins
 ```
 
-StatefulSet：
+StatefulSet:
 
 ```text
 lab4-redis
 ```
 
-Service：
+Service:
 
 ```text
 lab4-gateway
@@ -668,7 +679,7 @@ lab4-map-ruins
 lab4-redis
 ```
 
-HPA：
+HPA:
 
 ```text
 lab4-gateway
@@ -678,26 +689,26 @@ lab4-map-cave
 lab4-map-ruins
 ```
 
-服务端口约定：
+Port conventions:
 
-| 组件 | 端口 | 用途 |
+| Component | Port | Purpose |
 | --- | --- | --- |
-| gateway | 9310 | 对外 TCP 游戏端口 |
-| gateway | 9311 | HTTP 健康检查端口 |
-| coordinator | 9320 | 内部 HTTP 服务端口 |
-| map | 9400 | 内部 HTTP 服务端口 |
-| redis | 6379 | Redis 服务端口 |
+| gateway | 9310 | External TCP game port |
+| gateway | 9311 | HTTP health-check port |
+| coordinator | 9320 | Internal HTTP service port |
+| map | 9400 | Internal HTTP service port |
+| redis | 6379 | Redis service port |
 
-gateway 的 Kubernetes Service 必须暴露 NodePort：
+The Kubernetes Service for gateway must expose the following NodePort:
 
 ```text
 containerPort: 9310
 nodePort: 30910
 ```
 
-## 8. 关键环境变量
+## 8. Key Environment Variables
 
-gateway 至少需要：
+gateway requires at least:
 
 ```text
 LAB4_GATEWAY_ADDR=0.0.0.0:9310
@@ -706,7 +717,7 @@ LAB4_COORDINATOR_URL=http://lab4-coordinator:9320
 LAB4_NAMESPACE=lab4
 ```
 
-coordinator 至少需要：
+coordinator requires at least:
 
 ```text
 LAB4_COORDINATOR_ADDR=:9320
@@ -722,7 +733,7 @@ LAB4_RUINS_NODE_ID=map-ruins
 LAB4_NAMESPACE=lab4
 ```
 
-map-green 建议配置：
+Recommended configuration for map-green:
 
 ```text
 LAB4_MAP_LISTEN_ADDR=:9400
@@ -735,7 +746,7 @@ LAB4_COMPONENT=map-green
 LAB4_NAMESPACE=lab4
 ```
 
-map-cave 建议配置：
+Recommended configuration for map-cave:
 
 ```text
 LAB4_MAP_LISTEN_ADDR=:9400
@@ -748,7 +759,7 @@ LAB4_COMPONENT=map-cave
 LAB4_NAMESPACE=lab4
 ```
 
-map-ruins 建议配置：
+Recommended configuration for map-ruins:
 
 ```text
 LAB4_MAP_LISTEN_ADDR=:9400
@@ -761,9 +772,9 @@ LAB4_COMPONENT=map-ruins
 LAB4_NAMESPACE=lab4
 ```
 
-## 9. HPA 和 Pod 回收要求
+## 9. HPA and Pod Recycling Requirements
 
-5 个业务 Deployment 都应该配置 HPA：
+All five business Deployments should be configured with HPA:
 
 ```text
 lab4-gateway
@@ -773,30 +784,30 @@ lab4-map-cave
 lab4-map-ruins
 ```
 
-HPA 要求：
+HPA requirements:
 
 ```text
 minReplicas: 1
 maxReplicas: 10
 ```
 
-CPU 目标值可以自己设置。建议先从 50% 到 70% 之间尝试，再根据 scoretest 结果调优。
+You may choose the CPU target value. It is recommended to start between 50% and 70%, then tune it according to the scoretest result.
 
-Redis 不建议配置 HPA。Redis 是本实验中的状态中心，随意扩缩容会带来数据一致性问题。测试脚本也会检查 Redis 不应配置 HPA。
+Redis should not be configured with HPA. Redis is the state centre in this lab, and arbitrary scaling may introduce consistency problems. The test scripts also check that Redis is not configured with HPA.
 
-HPA 缩容、滚动更新、手动下线 Pod 时，Kubernetes 可能会回收正在承载玩家的 Pod。为了尽量做到用户无感，你需要设计生命周期处理。
+During HPA scale-down, rolling updates, or manual Pod termination, Kubernetes may recycle Pods that are serving active players. To minimise user disruption, lifecycle handling is required.
 
-本代码中已经提供了一些支持逻辑，主要思路是：
+The code already provides some supporting logic. The main idea is:
 
 ```text
-1. Pod 准备接收流量时，readinessProbe 返回成功。
-2. Pod 准备退出时，preStop 调用服务的 drain 接口。
-3. 服务进入 draining 状态后，readinessProbe 返回失败。
-4. Service 不再把新请求转发到该 Pod。
-5. Pod 尽量保存状态，等待已有操作结束后退出。
+1. When a Pod is ready to receive traffic, readinessProbe returns success.
+2. When a Pod is about to exit, preStop calls the service's drain endpoint.
+3. After the service enters draining state, readinessProbe returns failure.
+4. The Service stops forwarding new requests to that Pod.
+5. The Pod saves state where possible and waits for existing operations to finish before exiting.
 ```
 
-如果你希望组件能主动调整 Pod deletion-cost，业务 Pod 需要访问 Kubernetes API patch 自己的 annotations。通常需要配置：
+If the components actively adjust Pod deletion cost, business Pods need to access the Kubernetes API and patch their own annotations. This usually requires:
 
 ```text
 ServiceAccount
@@ -804,101 +815,101 @@ Role
 RoleBinding
 ```
 
-Role 至少需要允许业务 Pod 对本命名空间内的 Pod 做必要的 `get`、`list`、`patch` 操作。具体权限请根据你的实现设计，原则是够用即可，不要给过大的集群权限。
+The Role should at least allow business Pods to perform necessary `get`, `list`, and `patch` operations on Pods within the same namespace. Configure permissions according to the implementation, following the principle of least privilege.
 
-## 10. 评分说明
+## 10. Scoring Explanation
 
-基础测试只检查是否部署成功、功能是否完整。
+The basic test only checks whether the deployment succeeds and whether the required functions are complete.
 
-竞技评分满分 100 分：
-
-```text
-空闲不误扩：10
-低压稳定性：15
-高压弹性扩容：25
-状态一致性：20
-异常恢复：20
-资源纪律：10
-```
-
-评分脚本不会简单按绝对 TPS 或外部访问延迟打分，避免把学生电脑性能、服务器硬件、网络质量等不可控因素算进成绩。它更关注：
-
-- 该扩容时是否扩容。
-- 不该扩容时是否稳定。
-- 扩容后服务是否仍然正确。
-- Pod 被下线或回收时，状态是否能恢复。
-- 资源 requests/limits、HPA 和探针配置是否合理。
-
-## 11. 常见问题
-
-`scoretest` 看起来卡住了：
+The score test has a full mark of 100:
 
 ```text
-正常情况下脚本会每隔几秒输出阶段日志。
-如果长时间没有日志，请检查 kubectl 是否能访问集群、Gateway 地址是否可连通。
+No unnecessary scale-out while idle: 10
+Low-pressure stability: 15
+Elastic scale-out under high pressure: 25
+State consistency: 20
+Fault recovery: 20
+Resource discipline: 10
 ```
 
-HPA 一直是 `<unknown>`：
+The score script does not simply grade based on absolute TPS or external access latency, because these may be affected by student laptops, server hardware, network quality, and other uncontrollable factors. Instead, it focuses on:
+
+- Whether the system scales out when it should.
+- Whether the system remains stable when it should not scale.
+- Whether the service remains correct after scale-out.
+- Whether state can be recovered when Pods are terminated or recycled.
+- Whether resource requests/limits, HPA, and probes are configured appropriately.
+
+## 11. Common Issues
+
+`scoretest` appears to be stuck:
 
 ```text
-metrics-server 不可用，或者 Deployment 没有配置 CPU requests。
+Normally, the script prints stage logs every few seconds.
+If there is no output for a long time, check whether kubectl can access the cluster and whether the gateway address is reachable.
 ```
 
-Pod 是 `ImagePullBackOff`：
+HPA remains `<unknown>`:
 
 ```text
-节点拉不到镜像。请检查镜像名、imagePullPolicy、镜像仓库权限，或确认镜像已导入到对应节点。
+metrics-server is unavailable, or the Deployment does not configure CPU requests.
 ```
 
-Pod 是 `CrashLoopBackOff`：
+Pod is in `ImagePullBackOff`:
 
 ```text
-通常是启动命令、环境变量、端口、Redis 地址或 Service DNS 配错。
-先看 kubectl -n lab4 logs <pod-name>。
+The node cannot pull the image. Check the image name, imagePullPolicy, registry permission, or confirm that the image has been imported into the corresponding node.
 ```
 
-Service 能创建但外部访问不到：
+Pod is in `CrashLoopBackOff`:
 
 ```text
-检查 lab4-gateway 是否是 NodePort。
-检查 nodePort 是否是 30910。
-检查云平台网络规则是否允许访问 30910。
-检查你访问的是可从本机访问的节点地址。
+This is usually caused by an incorrect startup command, environment variables, ports, Redis address, or Service DNS.
+Check kubectl -n lab4 logs <pod-name> first.
 ```
 
-为什么明明 `docker images` 有镜像，Pod 还是拉不到：
+Service is created but cannot be accessed externally:
 
 ```text
-Kubernetes 使用的运行时可能是 containerd。
-Pod 能否启动取决于 Kubernetes 运行时能否看到镜像，不完全取决于 docker images。
-优先用 ctr -n k8s.io images ls 或 crictl images 检查。
+Check whether lab4-gateway is a NodePort Service.
+Check whether nodePort is 30910.
+Check whether the cloud security rules allow access to 30910.
+Check whether you are accessing a node address reachable from your local machine.
 ```
 
-为什么我的 Pod 没有平均分布到所有节点：
+Why Pods cannot pull an image even though it appears under `docker images`:
 
 ```text
-Kubernetes 调度器会综合资源、已有 Pod、亲和性、污点、镜像可用性等因素选择节点。
-它不保证每个节点数量完全相同。
+The Kubernetes runtime may be containerd.
+Whether a Pod can start depends on whether the Kubernetes runtime can see the image, not only on docker images.
+Prefer ctr -n k8s.io images ls or crictl images for checking.
 ```
 
-Pod 会自动迁移吗：
+Why Pods are not evenly distributed across all nodes:
 
 ```text
-不会像虚拟机一样原地迁移。
-通常是旧 Pod 下线或扩缩容创建了新 Pod，新 Pod 被调度到其他节点。
+The Kubernetes scheduler considers resources, existing Pods, affinity, taints, image availability, and other factors.
+It does not guarantee exactly equal Pod counts on all nodes.
 ```
 
-## 12. 可以优化的方向
+Will Pods migrate automatically?
 
-基础部署成功后，可以从下面方向提高竞技评分：
+```text
+Not in the same way as a virtual machine live migration.
+Usually, the old Pod is terminated or a new Pod is created during scaling, and the new Pod may be scheduled to another node.
+```
 
-- 减小镜像体积，提高镜像导入和 Pod 启动速度。
-- 合理设置 CPU requests，让 HPA 既不误扩，也能及时扩容。
-- 给不同组件设置不同资源，避免所有组件一刀切。
-- 优化 coordinator 和 map 的热点逻辑，减少无意义 CPU 消耗。
-- 让 gateway、coordinator、map 在 Pod 回收时更平滑地进入 drain。
-- 改进状态保存和恢复逻辑，降低异常期间的数据丢失概率。
-- 调整 HPA behavior，让扩容更及时、缩容更稳。
-- 设计更合理的 Pod 分布策略，避免所有副本堆在同一个节点。
+## 12. Possible Optimisation Directions
 
-本实验的重点不是“照着模板部署成功”，而是理解一个真实游戏服务上云后会遇到的弹性、状态、异常恢复和成本问题。部署只是起点，调优才是区分度所在。
+After the basic deployment succeeds, the following directions may improve the score:
+
+- Reduce image size to improve image import and Pod startup speed.
+- Set CPU requests appropriately so that HPA avoids unnecessary scaling while still scaling out in time.
+- Assign different resources to different components instead of using a single setting for all components.
+- Optimise hotspot logic in the coordinator and map services to reduce unnecessary CPU consumption.
+- Allow gateway, coordinator, and map services to enter drain mode more smoothly during Pod recycling.
+- Improve state persistence and recovery to reduce data-loss probability during faults.
+- Tune HPA behaviour for faster scale-out and more stable scale-down.
+- Design a better Pod distribution strategy to avoid placing all replicas on the same node.
+
+The focus of this lab is not merely to deploy from a template successfully, but to understand elasticity, state, fault recovery, and cost issues that arise when a real game service is deployed to the cloud. Deployment is only the starting point; tuning is where the main differentiation lies.

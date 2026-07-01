@@ -9,9 +9,6 @@ networked multiplayer game systems. It starts from low-level TCP programming and
 progressively extends toward distributed state management, fault recovery, and
 Kubernetes-based cloud deployment.
 
-The project is organized as an academic portfolio artifact: each module is
-runnable, documented, and designed to demonstrate a specific systems concept.
-
 ## Highlights
 
 - Built multiplayer game prototypes in Go and C++ using TCP client-server architecture.
@@ -143,19 +140,18 @@ Run validation:
 ./test/run-scoretest.sh
 ```
 
-## Why This Project Matters
+## What I Learned
 
-This project connects systems programming with cloud-native deployment. Instead
-of treating cloud computing as only container configuration, it builds a full
-path from TCP protocol design and concurrent server logic to Kubernetes
-autoscaling, shared state management, graceful shutdown, and failure recovery.
+Through this project, my understanding of cloud computing moved beyond
+container deployment to the design, operation, and validation of a distributed
+service. The earlier labs helped me work through practical networking issues,
+including TCP connections, message framing, sticky packets, heartbeat,
+timeouts, and reconnection. They also clarified how shared state, connection
+management, and broadcast logic are handled in a concurrent game server.
 
-For research and graduate application purposes, the repository demonstrates
-hands-on experience with distributed systems concepts, reproducible experiments,
-and engineering-oriented validation.
-
-## Notes
-
-This repository is intended for academic and portfolio demonstration. Some
-subdirectories contain teaching-oriented lab scaffolds, experiment notes, and
-automated tests.
+The later labs extended the system into a distributed game backend with a
+gateway, a coordinator, multiple map services, and Redis-backed shared state.
+Deploying the system on Kubernetes helped me understand how service deployment,
+health checks, autoscaling, RBAC configuration, graceful draining, and automated
+tests fit together. It also made the relationship between state consistency,
+fault recovery, resource limits, and validation more concrete.
